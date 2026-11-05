@@ -1,0 +1,46 @@
+{
+  "_note": "BROUILLON construit à partir du site vigo-services.online. À faire valider par le dirigeant avant mise en production. Tout ce qui n'est pas ici, l'agent ne l'affirme pas.",
+  "language": ["fr"],
+  "tone": {"address": "vouvoiement", "style": "chaleureux et professionnel"},
+  "tools_enabled": ["get_business_info", "escalate_to_human"],
+  "agent": {"max_steps": 6},
+  "escalation": {"topics": ["plainte", "litige", "paiement", "tarif ou délai non renseigné"]},
+  "business_info": {
+    "presentation": "VIGO SERVICES (VGS) simplifie les démarches administratives, les livraisons et les courses à Cotonou et Abomey-Calavi.",
+    "zones": ["Cotonou", "Abomey-Calavi"],
+    "horaires": "Disponible 7j/7, de 8h à 20h.",
+    "contacts": {
+      "telephone": "01 67 30 75 35",
+      "whatsapp": ["01 96 41 85 75", "01 60 56 75 66"]
+    },
+    "services": {
+      "demarches_administratives": [
+        "Passeport (constitution du dossier et suivi jusqu'à l'obtention)",
+        "Acte de naissance sécurisé",
+        "CIP / carte d'identité",
+        "Carte biométrique",
+        "Casier judiciaire",
+        "Certificat de résidence",
+        "Certificat de nationalité",
+        "Paiement TTM et droits administratifs",
+        "Registre de commerce (enregistrement et actualisation pour entrepreneurs)"
+      ],
+      "livraison_et_courses": "Documents, colis, courses et repas livrés.",
+      "entreprises": "Solutions logistiques et administratives sur mesure pour les sociétés.",
+      "assistance_en_ligne": "Accompagnement humain et personnalisé, 7j/7.",
+      "services_numeriques": "Logos, sites web et gestion des réseaux sociaux."
+    },
+    "deroulement_demarche": [
+      "1. Contact : le client explique son besoin précis.",
+      "2. Dépôt des pièces : le client transmet les documents nécessaires.",
+      "3. Suivi du traitement : le client est tenu informé à chaque étape.",
+      "4. Remise du document : le client récupère son document finalisé."
+    ],
+    "informations_non_renseignees": [
+      "tarifs",
+      "délais de traitement",
+      "liste exacte des pièces à fournir pour chaque démarche",
+      "modes de paiement"
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+# PostgreSQL local pour le développement. Mots de passe = DEV UNIQUEMENT.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: agent24_owner      # propriétaire des tables : sert aux migrations uniquement
+      POSTGRES_PASSWORD: owner_pw
+      POSTGRES_DB: agent24
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent24_owner -d agent24"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
