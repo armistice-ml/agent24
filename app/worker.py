@@ -6,7 +6,7 @@ import logging
 import signal
 import time
 
-from app.agent.llm import AnthropicLLM, LLMClient
+from app.agent.llm import LLMClient
 from app.agent.orchestrator import handle_job, on_terminal_failure
 from app.channels.sender import SendError, get_sender
 from app.config import get_settings

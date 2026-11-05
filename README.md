@@ -1,4 +1,4 @@
-# Agent24 : backend (sessions 1 à 3)
+# Agent24 : backend (prototype `proto-v0`)
 
 Socle multi-tenant (PostgreSQL + RLS), webhook Messenger signé, file de traitement, agent Claude
 avec outils, envoi des réponses sur Messenger, escalades réelles vers le dirigeant (email), API du
@@ -12,8 +12,8 @@ docker compose up -d db         # PostgreSQL 16 + rôle agent24_app + base agent
 pip install -r requirements.txt
 alembic upgrade head            # migrations (rôle propriétaire)
 uvicorn app.main:app --reload   # API (rôle applicatif, soumis à la RLS)
-python -m app.worker            # worker : fait répondre l'agent (ANTHROPIC_API_KEY requis)
-pytest                          # 86 tests, sur la base agent24_test uniquement
+python -m app.worker            # worker : fait répondre l'agent (ANTHROPIC_API_KEY requis ; Groq possible avec APP_ENV=development)
+pytest                          # sur la base agent24_test uniquement
 ```
 
 ## Migrations
@@ -151,4 +151,10 @@ Chaque appel est tracé (`agent_runs`, `tool_calls`).
 - `messages.raw` contient les événements bruts (données personnelles) : à purger/limiter.
 - `media_ref` est une URL temporaire de Meta : il faudra télécharger les médias vite.
 - Un contact = une identité sur un canal ; la fusion entre canaux viendra avec WhatsApp.
-- Pas encore de file de traitement ni d'envoi de réponses.
+
+## Direction : architecture v2
+
+Ce dépôt contient le **prototype** (étiquette git `proto-v0`). La refonte en plateforme développeur est en cours :
+API publique versionnée `/v1`, authentification par clés API et jetons utilisateur, espaces Test et Live,
+webhooks sortants, usage et console développeurs. Le tableau de bord à cookies (`/api`) et la notion de
+secteur sont des éléments de prototype, appelés à disparaître. Voir le document « Architecture v2 ».
