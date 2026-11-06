@@ -1,0 +1,2324 @@
+openapi: 3.1.0
+
+info:
+  title: API Agent24
+  version: 1.0.0-draft
+  summary: Moteur d'agents IA pour la relation client, exposé par une API publique versionnée.
+  description: |
+    L'API Agent24 permet de piloter un agent IA qui répond aux clients d'une entreprise sur ses canaux de
+    messagerie : lire les conversations, reprendre la main, configurer l'agent, brancher des canaux, recevoir
+    des événements et suivre l'usage.
+
+    > **Statut : brouillon `1.0.0-draft`.** Ce contrat précède l'implémentation. Il peut encore évoluer
+    > jusqu'à la publication de `v1`.
+
+    ## Authentification
+
+    Deux types d'identifiants, transmis dans `Authorization: Bearer <identifiant>` :
+
+    | | Clé API | Jeton utilisateur |
+    |---|---|---|
+    | Pour | un serveur (intégration, tableau pilote avec backend) | un humain connecté à une interface |
+    | Forme | `a24_live_…` ou `a24_test_…` | jeton d'accès de courte durée |
+    | Droits | **portées** choisies à la création (`x-required-scope`) | **rôle** de l'utilisateur (`x-required-role`) |
+
+    Les endpoints de gestion (clés API, équipe, compte) n'acceptent **que** le jeton utilisateur : une clé
+    qui fuit ne peut pas créer d'autres clés.
+
+    **Ne placez jamais une clé API dans une application qui s'exécute dans un navigateur.** Une interface
+    purement navigateur utilise des jetons utilisateur ; un tableau pilote qui a son propre serveur utilise
+    une clé côté serveur.
+
+    ## Test et Live
+
+    Chaque compte possède deux espaces isolés. Une clé `a24_test_…` agit dans l'espace de **test** (aucun
+    envoi réel vers les canaux, messages simulés avec `POST /v1/test/messages`), une clé `a24_live_…` dans
+    l'espace **Live**. Avec un jeton utilisateur, l'en-tête `Agent24-Mode` choisit l'espace (Live par défaut).
+    Chaque objet porte un champ `livemode`.
+
+    ## Conventions
+
+    - **Versionnement** : dans l'URL (`/v1`). Les ajouts compatibles (nouveaux champs, nouveaux endpoints)
+      ne changent pas la version ; les clients doivent ignorer les champs inconnus.
+    - **Format** : JSON, champs en `snake_case`, dates ISO 8601 en UTC.
+    - **Identifiants** : chaînes opaques préfixées (`conv_…`, `msg_…`, `key_…`). Ne les analysez pas.
+    - **Pagination** : par curseur (`limit`, `cursor`) ; la réponse indique `has_more` et `next_cursor`.
+    - **Idempotence** : les `POST` qui créent ou déclenchent une action acceptent l'en-tête
+      `Idempotency-Key` ; rejouer la même clé renvoie le résultat de la première requête.
+    - **Traçabilité** : chaque réponse porte un en-tête `X-Request-Id`, à fournir au support.
+    - **Limites de débit** : par clé ; en cas de dépassement, réponse `429` avec `Retry-After`. Les en-têtes
+      `X-RateLimit-Limit`, `X-RateLimit-Remaining` et `X-RateLimit-Reset` indiquent l'état du quota.
+    - **Erreurs** : objet uniforme `{"error": {type, code, message, request_id}}` (voir `Error`).
+
+    ## Événements
+
+    Les événements sont **minces** : ils portent des identifiants, jamais le contenu des messages. Récupérez
+    ensuite la ressource par l'API. Ils sont livrés par webhooks sortants signés, ou en temps réel par
+    SSE (`/v1/events/stream`).
+
+  contact:
+    name: Équipe Agent24
+
+servers:
+  - url: https://{host}
+    description: Serveur de l'API
+    variables:
+      host:
+        default: api.example.com
+        description: Domaine de l'API (à définir au déploiement).
+
+tags:
+  - name: Authentification
+    description: Connexion des utilisateurs humains et identité courante.
+  - name: Compte
+    description: Compte de l'entreprise et équipe.
+  - name: Clés API
+    description: Création, rotation et révocation des clés. Jeton utilisateur uniquement.
+  - name: Conversations
+    description: Conversations, messages et reprise en main par un humain.
+  - name: Escalades
+    description: Demandes de prise en charge humaine émises par l'agent ou le système.
+  - name: Agent
+    description: État de l'agent et interrupteur d'urgence.
+  - name: Contacts
+    description: Clients finaux.
+  - name: Configuration
+    description: Configuration versionnée de l'agent.
+  - name: Canaux
+    description: Canaux de messagerie connectés.
+  - name: Webhooks
+    description: Notifications sortantes vers vos systèmes.
+  - name: Temps réel
+    description: Événements en continu et rattrapage.
+  - name: Usage et statistiques
+    description: Mesures d'usage et indicateurs d'activité.
+  - name: Test
+    description: Outils réservés à l'espace de test.
+
+security:
+  - ApiKey: []
+  - UserToken: []
+
+paths:
+  # ------------------------------------------------------------------ Authentification
+  /v1/auth/login:
+    post:
+      tags: [Authentification]
+      operationId: login
+      summary: Ouvrir une session utilisateur
+      description: Échange un e-mail et un mot de passe contre un jeton d'accès et un jeton de rafraîchissement.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Session ouverte.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /v1/auth/refresh:
+    post:
+      tags: [Authentification]
+      operationId: refreshToken
+      summary: Renouveler le jeton d'accès
+      description: Le jeton de rafraîchissement est à usage unique ; la réponse en contient un nouveau (rotation).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: Nouveaux jetons.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenPair' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /v1/auth/logout:
+    post:
+      tags: [Authentification]
+      operationId: logout
+      summary: Fermer la session
+      description: Révoque le jeton de rafraîchissement fourni.
+      security:
+        - UserToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '204': { description: Session fermée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /v1/me:
+    get:
+      tags: [Authentification]
+      operationId: getMe
+      summary: Identité courante
+      description: Indique le compte, l'espace (test ou live) et l'identifiant utilisé (clé ou utilisateur).
+      responses:
+        '200':
+          description: Identité courante.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Principal' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------ Compte et équipe
+  /v1/account:
+    get:
+      tags: [Compte]
+      operationId: getAccount
+      summary: Lire le compte
+      security:
+        - UserToken: []
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Compte.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    patch:
+      tags: [Compte]
+      operationId: updateAccount
+      summary: Modifier le compte
+      security:
+        - UserToken: []
+      x-required-role: owner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AccountUpdate' }
+      responses:
+        '200':
+          description: Compte mis à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Account' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/members:
+    get:
+      tags: [Compte]
+      operationId: listMembers
+      summary: Lister l'équipe
+      security:
+        - UserToken: []
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Membres de l'équipe.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MemberList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Compte]
+      operationId: inviteMember
+      summary: Inviter un membre
+      description: Envoie une invitation par e-mail avec le rôle indiqué.
+      security:
+        - UserToken: []
+      x-required-role: owner
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberInvite' }
+      responses:
+        '201':
+          description: Invitation créée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/members/{member_id}:
+    parameters:
+      - $ref: '#/components/parameters/MemberId'
+    patch:
+      tags: [Compte]
+      operationId: updateMember
+      summary: Modifier le rôle ou le statut d'un membre
+      security:
+        - UserToken: []
+      x-required-role: owner
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MemberUpdate' }
+      responses:
+        '200':
+          description: Membre mis à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Member' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+    delete:
+      tags: [Compte]
+      operationId: removeMember
+      summary: Retirer un membre
+      description: Révoque ses sessions. Le dernier propriétaire ne peut pas être retiré.
+      security:
+        - UserToken: []
+      x-required-role: owner
+      responses:
+        '204': { description: Membre retiré. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ------------------------------------------------------------------ Clés API
+  /v1/api-keys:
+    get:
+      tags: [Clés API]
+      operationId: listApiKeys
+      summary: Lister les clés API
+      description: Ne renvoie jamais le secret, seulement le préfixe et les quatre derniers caractères.
+      security:
+        - UserToken: []
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Clés de l'espace courant.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Clés API]
+      operationId: createApiKey
+      summary: Créer une clé API
+      description: |
+        Le secret complet n'est affiché **qu'une seule fois**, dans cette réponse. Il est stocké sous forme
+        d'empreinte et ne peut pas être récupéré ensuite. L'espace (test ou live) est celui de la requête.
+      security:
+        - UserToken: []
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Mode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApiKeyCreate' }
+      responses:
+        '201':
+          description: Clé créée.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/api-keys/{key_id}:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyId'
+    get:
+      tags: [Clés API]
+      operationId: getApiKey
+      summary: Lire une clé API
+      security:
+        - UserToken: []
+      x-required-role: manager
+      responses:
+        '200':
+          description: Clé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Clés API]
+      operationId: revokeApiKey
+      summary: Révoquer une clé API
+      description: La révocation est immédiate et définitive.
+      security:
+        - UserToken: []
+      x-required-role: manager
+      responses:
+        '204': { description: Clé révoquée. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/api-keys/{key_id}/roll:
+    parameters:
+      - $ref: '#/components/parameters/ApiKeyId'
+    post:
+      tags: [Clés API]
+      operationId: rollApiKey
+      summary: Faire tourner une clé API
+      description: |
+        Crée une nouvelle clé aux mêmes portées. L'ancienne reste valide pendant `grace_period_hours`
+        (24 h par défaut) pour laisser le temps de migrer, puis expire.
+      security:
+        - UserToken: []
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                grace_period_hours:
+                  type: integer
+                  minimum: 0
+                  maximum: 168
+                  default: 24
+      responses:
+        '201':
+          description: Nouvelle clé (secret affiché une seule fois).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiKeyWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ------------------------------------------------------------------ Conversations
+  /v1/conversations:
+    get:
+      tags: [Conversations]
+      operationId: listConversations
+      summary: Lister les conversations
+      description: Triées de la plus récente à la plus ancienne (dernier message).
+      x-required-scope: conversations:read
+      x-required-role: readonly
+      parameters:
+        - name: status
+          in: query
+          description: |
+            `open` (par défaut) : toutes sauf les conversations closes ; `all` : toutes ; sinon un état précis.
+          schema:
+            type: string
+            enum: [open, all, agent, human, closed]
+            default: open
+        - name: channel
+          in: query
+          description: Type de canal.
+          schema: { $ref: '#/components/schemas/ChannelType' }
+        - name: q
+          in: query
+          description: Recherche dans le nom du contact et dans le texte des messages.
+          schema: { type: string, maxLength: 100 }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Conversations.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /v1/conversations/{conversation_id}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Conversations]
+      operationId: getConversation
+      summary: Lire une conversation
+      x-required-scope: conversations:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Conversation.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/conversations/{conversation_id}/read:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      operationId: markConversationRead
+      summary: Marquer la conversation comme lue par l'équipe
+      x-required-scope: conversations:write
+      x-required-role: readonly
+      responses:
+        '204': { description: Conversation marquée comme lue. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/conversations/{conversation_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [Conversations]
+      operationId: listMessages
+      summary: Lister les messages d'une conversation
+      description: Du plus récent au plus ancien.
+      x-required-scope: conversations:read
+      x-required-role: readonly
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Messages.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MessageList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [Conversations]
+      operationId: sendMessage
+      summary: Envoyer un message humain
+      description: |
+        Envoie un message au client sur le canal de la conversation, au nom de l'équipe. La conversation doit
+        être prise en charge (`status = human`). En espace de test, l'envoi est simulé : le message est
+        enregistré avec `delivery_status = captured`.
+      x-required-scope: conversations:write
+      x-required-role: employee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MessageCreate' }
+      responses:
+        '201':
+          description: "Message accepté (l'envoi réel peut échouer : voir `delivery_status`)."
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+
+  /v1/conversations/{conversation_id}/take:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      operationId: takeConversation
+      summary: Prendre la main sur la conversation
+      description: "Passe `status` de `agent` à `human` : l'agent n'envoie plus rien. Prend en charge l'escalade active."
+      x-required-scope: conversations:write
+      x-required-role: employee
+      responses:
+        '200':
+          description: Conversation mise à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/conversations/{conversation_id}/handback:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      operationId: handBackConversation
+      summary: Rendre la conversation à l'agent
+      description: Passe `status` de `human` à `agent` et résout l'escalade (`resolution = handed_back`).
+      x-required-scope: conversations:write
+      x-required-role: employee
+      responses:
+        '200':
+          description: Conversation mise à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /v1/conversations/{conversation_id}/close:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [Conversations]
+      operationId: closeConversation
+      summary: Clore la conversation
+      description: Passe `status` à `closed` et résout l'escalade active (`resolution = closed`).
+      x-required-scope: conversations:write
+      x-required-role: employee
+      responses:
+        '200':
+          description: Conversation mise à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  # ------------------------------------------------------------------ Escalades
+  /v1/escalations:
+    get:
+      tags: [Escalades]
+      operationId: listEscalations
+      summary: Lister les escalades
+      description: |
+        Lecture seule. Une escalade se prend en charge, se rend à l'agent ou se clôt par les actions de la
+        conversation (`take`, `handback`, `close`). Il y a au plus une escalade active par conversation.
+      x-required-scope: escalations:read
+      x-required-role: readonly
+      parameters:
+        - name: status
+          in: query
+          description: '`handled` regroupe `taken` et `resolved`.'
+          schema:
+            type: string
+            enum: [open, taken, resolved, handled, all]
+            default: open
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Escalades, avec le décompte par statut.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EscalationList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/escalations/{escalation_id}:
+    parameters:
+      - $ref: '#/components/parameters/EscalationId'
+    get:
+      tags: [Escalades]
+      operationId: getEscalation
+      summary: Lire une escalade
+      x-required-scope: escalations:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Escalade.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Escalation' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Agent
+  /v1/agent/status:
+    get:
+      tags: [Agent]
+      operationId: getAgentStatus
+      summary: État de l'agent
+      x-required-scope: agent:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: État de l'agent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/agent/pause:
+    post:
+      tags: [Agent]
+      operationId: pauseAgent
+      summary: Mettre l'agent en pause (interrupteur d'urgence)
+      description: |
+        Suspend les réponses automatiques de **toutes** les conversations du compte. Les messages reçus
+        restent enregistrés. Réversible avec `resume`.
+      x-required-scope: agent:write
+      x-required-role: manager
+      responses:
+        '200':
+          description: État de l'agent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/agent/resume:
+    post:
+      tags: [Agent]
+      operationId: resumeAgent
+      summary: Reprendre les réponses automatiques
+      x-required-scope: agent:write
+      x-required-role: manager
+      responses:
+        '200':
+          description: État de l'agent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentStatus' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------ Contacts
+  /v1/contacts:
+    get:
+      tags: [Contacts]
+      operationId: listContacts
+      summary: Lister les contacts
+      x-required-scope: contacts:read
+      x-required-role: readonly
+      parameters:
+        - name: q
+          in: query
+          description: Recherche dans le nom.
+          schema: { type: string, maxLength: 100 }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Contacts.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContactList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/contacts/{contact_id}:
+    parameters:
+      - $ref: '#/components/parameters/ContactId'
+    get:
+      tags: [Contacts]
+      operationId: getContact
+      summary: Lire un contact
+      x-required-scope: contacts:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Contact.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Contact' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Contacts]
+      operationId: updateContact
+      summary: Modifier un contact
+      x-required-scope: contacts:write
+      x-required-role: employee
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ContactUpdate' }
+      responses:
+        '200':
+          description: Contact mis à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Contact' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  # ------------------------------------------------------------------ Configuration
+  /v1/config:
+    get:
+      tags: [Configuration]
+      operationId: getConfig
+      summary: Lire la configuration courante de l'agent
+      description: L'en-tête `ETag` contient la version ; il sert de précondition pour `PUT`.
+      x-required-scope: config:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Configuration courante.
+          headers:
+            ETag:
+              description: Version de la configuration.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Config' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [Configuration]
+      operationId: putConfig
+      summary: Remplacer la configuration de l'agent
+      description: |
+        Remplace le document complet et crée une nouvelle version. Fournissez `If-Match` avec la version lue
+        pour éviter d'écraser la modification d'un autre utilisateur ; sinon `412`.
+      x-required-scope: config:write
+      x-required-role: manager
+      parameters:
+        - name: If-Match
+          in: header
+          required: true
+          description: Version de la configuration lue (valeur de l'en-tête `ETag`).
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigDocument' }
+      responses:
+        '200':
+          description: Nouvelle version de la configuration.
+          headers:
+            ETag:
+              description: Nouvelle version.
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Config' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '412': { $ref: '#/components/responses/PreconditionFailed' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/config/versions:
+    get:
+      tags: [Configuration]
+      operationId: listConfigVersions
+      summary: Historique des versions de la configuration
+      x-required-scope: config:read
+      x-required-role: readonly
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Versions, de la plus récente à la plus ancienne.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigVersionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/config/versions/{version}/restore:
+    parameters:
+      - name: version
+        in: path
+        required: true
+        schema: { type: integer, minimum: 1 }
+    post:
+      tags: [Configuration]
+      operationId: restoreConfigVersion
+      summary: Restaurer une version précédente
+      description: Crée une nouvelle version dont le contenu est celui de la version indiquée.
+      x-required-scope: config:write
+      x-required-role: manager
+      responses:
+        '200':
+          description: Nouvelle version de la configuration.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Config' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Canaux
+  /v1/channels:
+    get:
+      tags: [Canaux]
+      operationId: listChannels
+      summary: Lister les canaux
+      x-required-scope: channels:read
+      x-required-role: readonly
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Canaux.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Canaux]
+      operationId: createChannel
+      summary: Connecter un canal
+      description: |
+        Les canaux réels (`messenger`, `whatsapp`…) ne se connectent qu'en **Live**. L'espace de test
+        utilise le canal `simulated`. Le jeton d'accès est chiffré au repos et n'est jamais renvoyé.
+      x-required-scope: channels:write
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelCreate' }
+      responses:
+        '201':
+          description: Canal connecté.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/channels/{channel_id}:
+    parameters:
+      - $ref: '#/components/parameters/ChannelId'
+    get:
+      tags: [Canaux]
+      operationId: getChannel
+      summary: Lire un canal
+      x-required-scope: channels:read
+      x-required-role: readonly
+      responses:
+        '200':
+          description: Canal.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Canaux]
+      operationId: updateChannel
+      summary: Modifier un canal
+      x-required-scope: channels:write
+      x-required-role: manager
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelUpdate' }
+      responses:
+        '200':
+          description: Canal mis à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Channel' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      tags: [Canaux]
+      operationId: deleteChannel
+      summary: Déconnecter un canal
+      description: Les conversations existantes sont conservées ; le canal cesse de recevoir et d'envoyer.
+      x-required-scope: channels:write
+      x-required-role: manager
+      responses:
+        '204': { description: Canal déconnecté. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Webhooks sortants
+  /v1/webhook-endpoints:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookEndpoints
+      summary: Lister les endpoints de webhook
+      x-required-scope: webhooks:read
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Endpoints.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [Webhooks]
+      operationId: createWebhookEndpoint
+      summary: Déclarer un endpoint de webhook
+      description: |
+        L'URL doit être en HTTPS. Le secret de signature (`whsec_…`) n'est affiché **qu'une fois**, dans cette
+        réponse. Voir la section `webhooks` de ce contrat pour le format des livraisons et la vérification
+        de la signature.
+      x-required-scope: webhooks:write
+      x-required-role: manager
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEndpointCreate' }
+      responses:
+        '201':
+          description: Endpoint créé.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/webhook-endpoints/{endpoint_id}:
+    parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+    get:
+      tags: [Webhooks]
+      operationId: getWebhookEndpoint
+      summary: Lire un endpoint de webhook
+      x-required-scope: webhooks:read
+      x-required-role: manager
+      responses:
+        '200':
+          description: Endpoint.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [Webhooks]
+      operationId: updateWebhookEndpoint
+      summary: Modifier un endpoint de webhook
+      description: Permet aussi de réactiver un endpoint désactivé automatiquement après des échecs répétés.
+      x-required-scope: webhooks:write
+      x-required-role: manager
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WebhookEndpointUpdate' }
+      responses:
+        '200':
+          description: Endpoint mis à jour.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpoint' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhookEndpoint
+      summary: Supprimer un endpoint de webhook
+      x-required-scope: webhooks:write
+      x-required-role: manager
+      responses:
+        '204': { description: Endpoint supprimé. }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook-endpoints/{endpoint_id}/rotate-secret:
+    parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+    post:
+      tags: [Webhooks]
+      operationId: rotateWebhookSecret
+      summary: Changer le secret de signature
+      description: Le nouveau secret est affiché une seule fois. L'ancien reste accepté 24 h pour la transition.
+      x-required-scope: webhooks:write
+      x-required-role: manager
+      responses:
+        '200':
+          description: Endpoint avec son nouveau secret.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookEndpointWithSecret' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook-endpoints/{endpoint_id}/deliveries:
+    parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookDeliveries
+      summary: Journal des livraisons
+      x-required-scope: webhooks:read
+      x-required-role: manager
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, succeeded, failed]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Livraisons, de la plus récente à la plus ancienne.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDeliveryList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /v1/webhook-endpoints/{endpoint_id}/deliveries/{delivery_id}/retry:
+    parameters:
+      - $ref: '#/components/parameters/WebhookEndpointId'
+      - $ref: '#/components/parameters/DeliveryId'
+    post:
+      tags: [Webhooks]
+      operationId: retryWebhookDelivery
+      summary: Rejouer une livraison
+      x-required-scope: webhooks:write
+      x-required-role: manager
+      responses:
+        '202':
+          description: Livraison remise en file.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WebhookDelivery' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ------------------------------------------------------------------ Temps réel
+  /v1/events:
+    get:
+      tags: [Temps réel]
+      operationId: listEvents
+      summary: Rattraper les événements récents
+      description: |
+        Renvoie les événements postérieurs à `after`, du plus ancien au plus récent. À utiliser après une
+        coupure du flux ou pour un client qui préfère interroger. Les événements sont conservés 7 jours.
+      x-required-scope: events:read
+      x-required-role: readonly
+      parameters:
+        - name: after
+          in: query
+          description: Identifiant du dernier événement reçu. Sans valeur, renvoie les plus récents.
+          schema: { type: string }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Événements.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/events/ticket:
+    post:
+      tags: [Temps réel]
+      operationId: createEventTicket
+      summary: Obtenir un ticket pour le flux temps réel
+      description: |
+        `EventSource` dans un navigateur ne permet pas d'envoyer l'en-tête `Authorization`. Ce ticket, à
+        **usage unique** et valable une minute, s'utilise dans l'URL du flux. Il hérite de l'espace
+        (test ou live) de la requête.
+      x-required-scope: events:read
+      x-required-role: readonly
+      parameters:
+        - $ref: '#/components/parameters/Mode'
+      responses:
+        '201':
+          description: Ticket.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EventTicket' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/events/stream:
+    get:
+      tags: [Temps réel]
+      operationId: streamEvents
+      summary: Flux d'événements (Server-Sent Events)
+      description: |
+        Flux `text/event-stream`. Chaque événement SSE porte `id` (identifiant de l'événement), `event`
+        (son type) et `data` (objet `Event` en JSON). Après une reconnexion, le navigateur renvoie
+        `Last-Event-ID` ; à défaut, rattrapez avec `GET /v1/events?after=`.
+      security: []
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          description: Ticket obtenu avec `POST /v1/events/ticket`.
+          schema: { type: string }
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Flux ouvert.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Événements SSE ; le champ `data` contient un objet `Event`.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------ Usage et statistiques
+  /v1/usage:
+    get:
+      tags: [Usage et statistiques]
+      operationId: getUsage
+      summary: Usage sur une période
+      description: Messages et tokens consommés, base des quotas et de la facturation.
+      x-required-scope: usage:read
+      x-required-role: manager
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          description: Date de fin incluse.
+          schema: { type: string, format: date }
+        - name: granularity
+          in: query
+          schema:
+            type: string
+            enum: [day, month]
+            default: day
+      responses:
+        '200':
+          description: Usage.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Usage' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+  /v1/stats/overview:
+    get:
+      tags: [Usage et statistiques]
+      operationId: getStatsOverview
+      summary: Vue d'ensemble de l'activité
+      description: Indicateurs du jour et de la veille, dans le fuseau horaire du compte.
+      x-required-scope: stats:read
+      x-required-role: readonly
+      parameters:
+        - name: day
+          in: query
+          description: Jour de référence (par défaut aujourd'hui).
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Indicateurs.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsOverview' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /v1/stats/activity:
+    get:
+      tags: [Usage et statistiques]
+      operationId: getStatsActivity
+      summary: Messages reçus par heure
+      description: Heure locale du compte, pour le jour de référence et la veille.
+      x-required-scope: stats:read
+      x-required-role: readonly
+      parameters:
+        - name: day
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Activité horaire.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StatsActivity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ------------------------------------------------------------------ Test
+  /v1/test/messages:
+    post:
+      tags: [Test]
+      operationId: simulateInboundMessage
+      summary: Simuler un message entrant
+      description: |
+        **Espace de test uniquement** (`409 live_mode_not_allowed` en Live). Crée le contact et la conversation
+        si besoin, enregistre le message comme s'il arrivait d'un canal, et déclenche l'agent. La réponse de
+        l'agent apparaît dans la conversation (`delivery_status = captured`) et déclenche les mêmes
+        événements qu'en Live.
+      x-required-scope: test:write
+      x-required-role: employee
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/Mode'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TestMessageCreate' }
+      responses:
+        '202':
+          description: Message accepté ; l'agent répond de façon asynchrone.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TestMessageAccepted' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '422': { $ref: '#/components/responses/UnprocessableEntity' }
+
+# --------------------------------------------------------------------------- Webhooks sortants
+webhooks:
+  agent24Event:
+    post:
+      tags: [Webhooks]
+      operationId: receiveAgent24Event
+      summary: Livraison d'un événement
+      description: |
+        Agent24 envoie un `POST` JSON à chaque endpoint déclaré qui est abonné au type d'événement.
+
+        **Signature.** L'en-tête `Agent24-Signature` a la forme `t=<horodatage>,v1=<signature>`, où
+        `<signature>` est le HMAC-SHA256, en hexadécimal, de la chaîne `<horodatage>.<corps brut>` avec le
+        secret de l'endpoint (`whsec_…`). Recalculez-la, comparez en temps constant, et rejetez les
+        livraisons dont l'horodatage a plus de 5 minutes d'écart avec votre horloge.
+
+        **Réponse.** Répondez `2xx` rapidement (quelques secondes). Tout autre résultat, ou un délai
+        dépassé, déclenche de nouvelles tentatives espacées ; après des échecs répétés, l'endpoint est
+        désactivé et une alerte est émise. Une même livraison peut arriver plusieurs fois : dédoublonnez
+        avec `id`.
+
+        **Contenu.** Événements minces : identifiants uniquement, jamais le texte des messages.
+      security: []
+      parameters:
+        - name: Agent24-Signature
+          in: header
+          required: true
+          schema: { type: string }
+          example: 't=1793962345,v1=5257a869e7ecebeda32affa62cdca3fa51cad7e77a0e56ff536d0ce8e108d8bd'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Event' }
+      responses:
+        '200': { description: Livraison reçue. }
+
+# --------------------------------------------------------------------------- Composants
+components:
+  securitySchemes:
+    ApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: a24_live_… | a24_test_…
+      description: |
+        Clé API, pour les appels de serveur à serveur. L'espace (test ou live) est déterminé par la clé.
+        Les droits dépendent des portées de la clé (`x-required-scope`).
+    UserToken:
+      type: http
+      scheme: bearer
+      description: |
+        Jeton d'accès d'un utilisateur humain, obtenu avec `POST /v1/auth/login`. Les droits dépendent du rôle
+        (`x-required-role` : `readonly` < `employee` < `manager` < `owner`). L'en-tête `Agent24-Mode` choisit
+        l'espace.
+
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      description: Nombre maximal d'éléments renvoyés.
+      schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Curseur opaque renvoyé dans `next_cursor` par la page précédente.
+      schema: { type: string }
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Chaîne unique (UUID conseillé) choisie par le client. Rejouer la même clé avec le même corps renvoie
+        la réponse de la première requête, sans nouvel effet ; avec un corps différent : `409`.
+        Les clés sont conservées 24 heures.
+      schema: { type: string, maxLength: 255 }
+    Mode:
+      name: Agent24-Mode
+      in: header
+      description: Espace visé avec un jeton utilisateur. Ignoré avec une clé API (la clé fixe l'espace).
+      schema:
+        type: string
+        enum: [live, test]
+        default: live
+    ConversationId:
+      name: conversation_id
+      in: path
+      required: true
+      schema: { type: string, example: conv_2kq9x7m }
+    EscalationId:
+      name: escalation_id
+      in: path
+      required: true
+      schema: { type: string, example: esc_8s2v1d }
+    ContactId:
+      name: contact_id
+      in: path
+      required: true
+      schema: { type: string, example: ctc_5h3p0w }
+    ChannelId:
+      name: channel_id
+      in: path
+      required: true
+      schema: { type: string, example: chn_4b7n2c }
+    ApiKeyId:
+      name: key_id
+      in: path
+      required: true
+      schema: { type: string, example: key_9d1f6a }
+    MemberId:
+      name: member_id
+      in: path
+      required: true
+      schema: { type: string, example: usr_3m8e5r }
+    WebhookEndpointId:
+      name: endpoint_id
+      in: path
+      required: true
+      schema: { type: string, example: whe_7c4t2k }
+    DeliveryId:
+      name: delivery_id
+      in: path
+      required: true
+      schema: { type: string, example: whd_1x9z3q }
+
+  responses:
+    BadRequest:
+      description: Requête mal formée.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Identifiant absent, invalide, expiré ou révoqué (`authentication_error`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              type: authentication_error
+              code: invalid_api_key
+              message: La clé API fournie est invalide ou a été révoquée.
+              request_id: req_6f2a9c1e
+    Forbidden:
+      description: |
+        Identifiant valide mais droits insuffisants : portée manquante, rôle insuffisant, ou action réservée
+        au jeton utilisateur (`permission_error`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+          example:
+            error:
+              type: permission_error
+              code: missing_scope
+              message: Cette clé n'a pas la portée requise.
+              request_id: req_6f2a9c1e
+              param: conversations:write
+    NotFound:
+      description: Ressource introuvable dans l'espace courant (`not_found_error`).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: |
+        L'état actuel ne permet pas l'action (`conflict_error`), par exemple : conversation déjà prise en
+        charge, `Idempotency-Key` réutilisée avec un autre corps, action réservée à l'espace de test.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PreconditionFailed:
+      description: La version fournie dans `If-Match` n'est plus la version courante.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnprocessableEntity:
+      description: Paramètres valides en forme mais refusés (`invalid_request_error`). `param` désigne le champ fautif.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Limite de débit dépassée (`rate_limit_error`).
+      headers:
+        Retry-After:
+          description: Secondes à attendre avant de réessayer.
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    # ---------------------------------------------------------------- Erreurs et listes
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [type, code, message, request_id]
+          properties:
+            type:
+              type: string
+              enum:
+                - invalid_request_error
+                - authentication_error
+                - permission_error
+                - not_found_error
+                - conflict_error
+                - rate_limit_error
+                - api_error
+            code:
+              type: string
+              description: |
+                Code stable, lisible par une machine. Exemples : `invalid_api_key`, `missing_scope`,
+                `insufficient_role`, `not_found`, `conversation_not_human`, `already_taken`,
+                `idempotency_key_reuse`, `live_mode_not_allowed`, `rate_limited`.
+            message:
+              type: string
+              description: Explication lisible par un humain (français). Ne dépendez pas de son texte.
+            request_id:
+              type: string
+              description: Identique à l'en-tête `X-Request-Id`.
+            param:
+              type: string
+              description: Champ ou paramètre concerné, le cas échéant.
+          example:
+            type: invalid_request_error
+            code: text_too_long
+            message: Le texte dépasse 4000 caractères.
+            request_id: req_6f2a9c1e
+            param: text
+
+    ListMeta:
+      type: object
+      required: [object, has_more, next_cursor]
+      properties:
+        object: { type: string, const: list }
+        has_more: { type: boolean }
+        next_cursor:
+          type: [string, 'null']
+          description: À fournir dans `cursor` pour obtenir la page suivante ; `null` s'il n'y en a pas.
+
+    # ---------------------------------------------------------------- Authentification
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password, writeOnly: true }
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    TokenPair:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, const: Bearer }
+        expires_in:
+          type: integer
+          description: Durée de validité du jeton d'accès, en secondes.
+        refresh_token:
+          type: string
+          description: À usage unique ; remplacé à chaque renouvellement.
+    Principal:
+      type: object
+      required: [account, livemode, auth]
+      properties:
+        account:
+          type: object
+          required: [id, name]
+          properties:
+            id: { type: string }
+            name: { type: string }
+        livemode: { type: boolean }
+        auth:
+          type: object
+          required: [type]
+          properties:
+            type: { type: string, enum: [api_key, user] }
+            key_id: { type: string, description: Présent si `type = api_key`. }
+            scopes:
+              type: array
+              items: { type: string }
+              description: Présent si `type = api_key`.
+            user:
+              $ref: '#/components/schemas/Member'
+              description: Présent si `type = user`.
+
+    # ---------------------------------------------------------------- Compte et équipe
+    Account:
+      type: object
+      required: [id, name, timezone, status, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        timezone:
+          type: string
+          description: Fuseau IANA ; sert aux statistiques par jour et par heure.
+          example: Africa/Porto-Novo
+        status: { type: string, enum: [active, suspended] }
+        created_at: { type: string, format: date-time }
+    AccountUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        timezone: { type: string }
+    Role:
+      type: string
+      enum: [owner, manager, employee, readonly]
+    MemberSummary:
+      type: object
+      required: [id, display_name]
+      properties:
+        id: { type: string }
+        display_name: { type: string }
+    Member:
+      type: object
+      required: [id, email, name, role, status, created_at]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: [string, 'null'] }
+        role: { $ref: '#/components/schemas/Role' }
+        status: { type: string, enum: [invited, active, disabled] }
+        created_at: { type: string, format: date-time }
+    MemberInvite:
+      type: object
+      required: [email, role]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string, maxLength: 120 }
+        role: { $ref: '#/components/schemas/Role' }
+    MemberUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+        status: { type: string, enum: [active, disabled] }
+    MemberList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Member' }
+
+    # ---------------------------------------------------------------- Clés API
+    Scope:
+      type: string
+      enum:
+        - conversations:read
+        - conversations:write
+        - escalations:read
+        - agent:read
+        - agent:write
+        - contacts:read
+        - contacts:write
+        - config:read
+        - config:write
+        - channels:read
+        - channels:write
+        - webhooks:read
+        - webhooks:write
+        - events:read
+        - usage:read
+        - stats:read
+        - test:write
+      description: |
+        Portées d'une clé API. Il n'existe volontairement aucune portée pour gérer les clés API, l'équipe ou
+        le compte : ces actions exigent un jeton utilisateur. `test:write` n'a d'effet qu'avec une clé de test.
+    ApiKey:
+      type: object
+      required: [id, name, mode, scopes, prefix, last4, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        mode: { type: string, enum: [live, test] }
+        scopes:
+          type: array
+          items: { $ref: '#/components/schemas/Scope' }
+        prefix:
+          type: string
+          example: a24_live_
+        last4:
+          type: string
+          description: Quatre derniers caractères, pour reconnaître la clé dans une liste.
+        created_at: { type: string, format: date-time }
+        last_used_at: { type: [string, 'null'], format: date-time }
+        expires_at: { type: [string, 'null'], format: date-time }
+        revoked_at: { type: [string, 'null'], format: date-time }
+    ApiKeyCreate:
+      type: object
+      required: [name, scopes]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Nom libre pour reconnaître l'usage de la clé.
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: { $ref: '#/components/schemas/Scope' }
+        expires_at:
+          type: [string, 'null']
+          format: date-time
+          description: Expiration optionnelle.
+    ApiKeyWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/ApiKey'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Clé complète. **Affichée une seule fois**, impossible à récupérer ensuite.
+              example: a24_live_k3JmQ9v2Xr7LpT0wNs5YcB8dFhZ1aEuG
+    ApiKeyList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/ApiKey' }
+
+    # ---------------------------------------------------------------- Canaux
+    ChannelType:
+      type: string
+      enum: [messenger, whatsapp, instagram, telegram, email, simulated]
+      description: '`simulated` n''existe qu''en espace de test ; les autres types ne se connectent qu''en Live.'
+    Channel:
+      type: object
+      required: [id, type, external_id, status, livemode, created_at]
+      properties:
+        id: { type: string }
+        type: { $ref: '#/components/schemas/ChannelType' }
+        external_id:
+          type: string
+          description: Identifiant du compte sur la plateforme (par exemple l'identifiant de la page Facebook).
+        name: { type: [string, 'null'] }
+        status: { type: string, enum: [active, disabled] }
+        livemode: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ChannelCreate:
+      type: object
+      required: [type, external_id]
+      properties:
+        type: { $ref: '#/components/schemas/ChannelType' }
+        external_id: { type: string }
+        name: { type: string, maxLength: 120 }
+        access_token:
+          type: string
+          writeOnly: true
+          description: Jeton d'accès de la plateforme. Chiffré au repos, jamais renvoyé.
+    ChannelUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 120 }
+        status: { type: string, enum: [active, disabled] }
+        access_token: { type: string, writeOnly: true }
+    ChannelList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Channel' }
+    ChannelRef:
+      type: object
+      required: [id, type]
+      properties:
+        id: { type: string }
+        type: { $ref: '#/components/schemas/ChannelType' }
+
+    # ---------------------------------------------------------------- Contacts
+    ContactSummary:
+      type: object
+      required: [id, display_name]
+      properties:
+        id: { type: string }
+        display_name:
+          type: string
+          description: Nom du contact, ou « Client ••1234 » (quatre derniers caractères de l'identifiant du canal) s'il est inconnu.
+    Contact:
+      type: object
+      required: [id, channel, channel_user_id, profile, livemode, created_at]
+      properties:
+        id: { type: string }
+        name: { type: [string, 'null'] }
+        language:
+          type: [string, 'null']
+          description: Code de langue (par exemple `fr`).
+        channel: { $ref: '#/components/schemas/ChannelRef' }
+        channel_user_id:
+          type: string
+          description: Identifiant du contact sur le canal.
+        profile:
+          type: object
+          additionalProperties: true
+          description: Faits durables et notes sur le contact.
+        livemode: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ContactUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, maxLength: 120 }
+        language: { type: string, maxLength: 10 }
+        profile:
+          type: object
+          additionalProperties: true
+          description: Fusionné avec le profil existant (les clés à `null` sont supprimées).
+    ContactList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Contact' }
+
+    # ---------------------------------------------------------------- Conversations et messages
+    ConversationStatus:
+      type: string
+      enum: [agent, human, closed]
+      description: |
+        `agent` : l'agent répond. `human` : un humain a pris la main, l'agent n'envoie rien.
+        `closed` : conversation close.
+    Conversation:
+      type: object
+      required: [id, status, channel, contact, unread, livemode, created_at]
+      properties:
+        id: { type: string }
+        status: { $ref: '#/components/schemas/ConversationStatus' }
+        channel: { $ref: '#/components/schemas/ChannelRef' }
+        contact: { $ref: '#/components/schemas/ContactSummary' }
+        last_message_at: { type: [string, 'null'], format: date-time }
+        unread:
+          type: boolean
+          description: Des messages sont arrivés depuis la dernière lecture par l'équipe.
+        escalation:
+          description: Escalade active, ou `null`.
+          oneOf:
+            - $ref: '#/components/schemas/Escalation'
+            - type: 'null'
+        livemode: { type: boolean }
+        created_at: { type: string, format: date-time }
+    ConversationList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Conversation' }
+    Message:
+      type: object
+      required: [id, conversation_id, direction, author, type, delivery_status, created_at]
+      properties:
+        id: { type: string }
+        conversation_id: { type: string }
+        direction:
+          type: string
+          enum: [in, out]
+          description: '`in` : reçu du client. `out` : envoyé au client.'
+        author:
+          type: string
+          enum: [customer, agent, user, page_inbox]
+          description: |
+            `customer` : le client. `agent` : l'agent IA. `user` : un membre de l'équipe via l'API.
+            `page_inbox` : réponse humaine écrite directement dans la messagerie de la page.
+        type:
+          type: string
+          description: Type de contenu (`text`, `image`, `audio`…). Seul `text` est traité par l'agent pour l'instant.
+          example: text
+        text: { type: [string, 'null'] }
+        language: { type: [string, 'null'] }
+        delivery_status:
+          type: string
+          enum: [pending, sent, failed, captured]
+          description: |
+            Pour les messages sortants. `captured` : message enregistré sans envoi réel (espace de test).
+            Toujours `sent` pour les messages entrants.
+        received_at: { type: [string, 'null'], format: date-time }
+        sent_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    MessageCreate:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 4000 }
+    MessageList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Message' }
+
+    # ---------------------------------------------------------------- Escalades
+    Escalation:
+      type: object
+      required: [id, conversation_id, status, category, source, created_at]
+      properties:
+        id: { type: string }
+        conversation_id: { type: string }
+        status: { type: string, enum: [open, taken, resolved] }
+        category:
+          type: string
+          enum: [plainte, litige, paiement, information_manquante, sensible, technique, autre]
+        source:
+          type: string
+          enum: [agent, system]
+          description: '`agent` : demandée par l''agent. `system` : déclenchée par le système (échec technique, par exemple).'
+        reason: { type: [string, 'null'] }
+        summary:
+          type: [string, 'null']
+          description: Résumé du contexte pour la personne qui prend le relais.
+        resolution:
+          type: [string, 'null']
+          enum: [handed_back, closed, null]
+        taken_by:
+          description: Membre qui a pris la conversation en charge.
+          oneOf:
+            - $ref: '#/components/schemas/MemberSummary'
+            - type: 'null'
+        taken_at: { type: [string, 'null'], format: date-time }
+        resolved_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    EscalationList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data, counts]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Escalation' }
+            counts:
+              type: object
+              description: Nombre d'escalades par statut, indépendamment du filtre.
+              required: [open, taken, resolved]
+              properties:
+                open: { type: integer }
+                taken: { type: integer }
+                resolved: { type: integer }
+
+    # ---------------------------------------------------------------- Agent
+    AgentStatus:
+      type: object
+      required: [paused]
+      properties:
+        paused: { type: boolean }
+        paused_at: { type: [string, 'null'], format: date-time }
+
+    # ---------------------------------------------------------------- Configuration
+    ConfigDocument:
+      type: object
+      description: |
+        Comportement de l'agent pour ce compte. Il n'y a pas de notion de secteur : tout se règle ici.
+        Les champs inconnus sont refusés (`422`).
+      additionalProperties: false
+      properties:
+        timezone:
+          type: string
+          description: Fuseau IANA. Par défaut, celui du compte.
+        language:
+          type: array
+          items: { type: string }
+          description: Langues acceptées, en codes courts.
+          example: [fr]
+        tone:
+          type: object
+          additionalProperties: false
+          properties:
+            address:
+              type: string
+              description: Façon de s'adresser au client.
+              example: vouvoiement
+            style:
+              type: string
+              example: chaleureux et formel
+        instructions:
+          type: string
+          maxLength: 20000
+          description: |
+            Texte libre : ce que fait l'entreprise, ses règles, ce que l'agent ne doit pas faire.
+            Les règles de la plateforme restent prioritaires.
+        business_info:
+          type: object
+          additionalProperties: true
+          description: Informations officielles lues par l'agent (horaires, tarifs, politiques…).
+        tools_enabled:
+          type: array
+          uniqueItems: true
+          items: { type: string }
+          description: Outils activés pour ce compte. Un outil non activé n'est ni exposé ni exécutable.
+          example: [get_business_info, escalate_to_human]
+        escalation:
+          type: object
+          additionalProperties: false
+          properties:
+            notify_emails:
+              type: array
+              items: { type: string, format: email }
+              description: Personnes prévenues par e-mail lors d'une escalade.
+            topics:
+              type: array
+              items: { type: string }
+              description: Sujets à transmettre systématiquement à un humain.
+        agent:
+          type: object
+          additionalProperties: false
+          properties:
+            model:
+              type: string
+              description: Modèle de langage utilisé pour ce compte. Valeur par défaut de la plateforme si absent.
+    Config:
+      type: object
+      required: [version, updated_at, document]
+      properties:
+        version:
+          type: integer
+          description: Numéro de version, croissant. Identique à l'`ETag`.
+        updated_at: { type: string, format: date-time }
+        updated_by:
+          type: [string, 'null']
+          description: Identifiant du membre ou de la clé à l'origine de la version.
+        document: { $ref: '#/components/schemas/ConfigDocument' }
+    ConfigVersionList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/Config' }
+
+    # ---------------------------------------------------------------- Webhooks et événements
+    EventType:
+      type: string
+      enum:
+        - message.received
+        - message.sent
+        - message.failed
+        - conversation.updated
+        - escalation.created
+        - escalation.updated
+        - agent.paused
+        - agent.resumed
+      description: |
+        `message.received` : message client enregistré. `message.sent` : message sortant envoyé.
+        `message.failed` : envoi sortant échoué. `conversation.updated` : état de la conversation modifié.
+        `escalation.created` / `escalation.updated` : cycle de vie d'une escalade.
+        `agent.paused` / `agent.resumed` : interrupteur d'urgence.
+    Event:
+      type: object
+      required: [id, type, created, livemode, data]
+      properties:
+        id:
+          type: string
+          description: Identifiant unique ; sert à dédoublonner et à reprendre le flux (`after`, `Last-Event-ID`).
+        type: { $ref: '#/components/schemas/EventType' }
+        created: { type: string, format: date-time }
+        livemode: { type: boolean }
+        data:
+          type: object
+          description: Identifiants seulement ; récupérez ensuite la ressource par l'API.
+          properties:
+            conversation_id: { type: [string, 'null'] }
+            escalation_id: { type: [string, 'null'] }
+      example:
+        id: evt_00000000a1b2
+        type: escalation.created
+        created: '2026-11-06T09:12:45Z'
+        livemode: true
+        data:
+          conversation_id: conv_2kq9x7m
+          escalation_id: esc_8s2v1d
+    EventList:
+      type: object
+      required: [object, data]
+      properties:
+        object: { type: string, const: list }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Event' }
+    EventTicket:
+      type: object
+      required: [ticket, expires_at, stream_url]
+      properties:
+        ticket: { type: string }
+        expires_at: { type: string, format: date-time }
+        stream_url:
+          type: string
+          format: uri
+          description: URL complète du flux, ticket inclus.
+    WebhookEndpoint:
+      type: object
+      required: [id, url, events, status, livemode, created_at]
+      properties:
+        id: { type: string }
+        url: { type: string, format: uri }
+        description: { type: [string, 'null'] }
+        events:
+          type: array
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/EventType'
+              - type: string
+                const: '*'
+          description: Types d'événements reçus ; `*` pour tous.
+        status:
+          type: string
+          enum: [enabled, disabled]
+          description: Passe à `disabled` automatiquement après des échecs répétés.
+        livemode: { type: boolean }
+        created_at: { type: string, format: date-time }
+    WebhookEndpointCreate:
+      type: object
+      required: [url, events]
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        description: { type: string, maxLength: 200 }
+        events:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/EventType'
+              - type: string
+                const: '*'
+    WebhookEndpointUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        url:
+          type: string
+          format: uri
+          pattern: '^https://'
+        description: { type: string, maxLength: 200 }
+        events:
+          type: array
+          minItems: 1
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/EventType'
+              - type: string
+                const: '*'
+        status: { type: string, enum: [enabled, disabled] }
+    WebhookEndpointWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/WebhookEndpoint'
+        - type: object
+          required: [secret]
+          properties:
+            secret:
+              type: string
+              description: Secret de signature. **Affiché une seule fois.**
+              example: whsec_Qm4Xr9Tz2LkP7vNc1YdW8sBjHa0EuFgV
+    WebhookEndpointList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/WebhookEndpoint' }
+    WebhookDelivery:
+      type: object
+      required: [id, endpoint_id, event_id, event_type, status, attempts, created_at]
+      properties:
+        id: { type: string }
+        endpoint_id: { type: string }
+        event_id: { type: string }
+        event_type: { $ref: '#/components/schemas/EventType' }
+        status: { type: string, enum: [pending, succeeded, failed] }
+        attempts: { type: integer, minimum: 0 }
+        response_status:
+          type: [integer, 'null']
+          description: Code HTTP de la dernière tentative.
+        next_attempt_at: { type: [string, 'null'], format: date-time }
+        created_at: { type: string, format: date-time }
+    WebhookDeliveryList:
+      allOf:
+        - $ref: '#/components/schemas/ListMeta'
+        - type: object
+          required: [data]
+          properties:
+            data:
+              type: array
+              items: { $ref: '#/components/schemas/WebhookDelivery' }
+
+    # ---------------------------------------------------------------- Usage et statistiques
+    UsagePoint:
+      type: object
+      required: [period_start, messages_in, agent_replies, input_tokens, output_tokens]
+      properties:
+        period_start:
+          type: string
+          format: date
+          description: Premier jour de la période.
+        messages_in: { type: integer }
+        agent_replies: { type: integer }
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+    Usage:
+      type: object
+      required: [from, to, granularity, data, totals]
+      properties:
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+        granularity: { type: string, enum: [day, month] }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/UsagePoint' }
+        totals:
+          type: object
+          required: [messages_in, agent_replies, input_tokens, output_tokens]
+          properties:
+            messages_in: { type: integer }
+            agent_replies: { type: integer }
+            input_tokens: { type: integer }
+            output_tokens: { type: integer }
+    DayStats:
+      type: object
+      required: [messages_in, agent_replies, escalations, input_tokens, output_tokens]
+      properties:
+        messages_in: { type: integer }
+        agent_replies: { type: integer }
+        escalations: { type: integer }
+        avg_response_seconds:
+          type: [number, 'null']
+          description: Délai moyen de réponse de l'agent.
+        input_tokens: { type: integer }
+        output_tokens: { type: integer }
+    StatsOverview:
+      type: object
+      required: [day, timezone, today, yesterday, escalations_by_status, conversations_by_status]
+      properties:
+        day: { type: string, format: date }
+        timezone: { type: string }
+        today: { $ref: '#/components/schemas/DayStats' }
+        yesterday: { $ref: '#/components/schemas/DayStats' }
+        escalations_by_status:
+          type: object
+          additionalProperties: { type: integer }
+        conversations_by_status:
+          type: object
+          additionalProperties: { type: integer }
+    HourCount:
+      type: object
+      required: [hour, messages]
+      properties:
+        hour: { type: integer, minimum: 0, maximum: 23 }
+        messages: { type: integer }
+    StatsActivity:
+      type: object
+      required: [day, timezone, today, yesterday]
+      properties:
+        day: { type: string, format: date }
+        timezone: { type: string }
+        today:
+          type: array
+          items: { $ref: '#/components/schemas/HourCount' }
+        yesterday:
+          type: array
+          items: { $ref: '#/components/schemas/HourCount' }
+
+    # ---------------------------------------------------------------- Test
+    TestMessageCreate:
+      type: object
+      required: [text]
+      properties:
+        text: { type: string, minLength: 1, maxLength: 4000 }
+        contact_ref:
+          type: string
+          maxLength: 100
+          default: test-contact
+          description: |
+            Nom du contact simulé. Un même nom réutilise le même contact et la même conversation ;
+            des noms différents simulent des clients différents.
+    TestMessageAccepted:
+      type: object
+      required: [message, conversation_id]
+      properties:
+        message: { $ref: '#/components/schemas/Message' }
+        conversation_id: { type: string }
